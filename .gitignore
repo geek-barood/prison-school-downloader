@@ -1,1 +1,4 @@
 prison-school/*
+venv
+*.pyc
+
