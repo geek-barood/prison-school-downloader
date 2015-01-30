@@ -1,4 +1,7 @@
-prison-school/*
 venv
 *.pyc
+*.jpg
+*.png
+*.jpeg
+*.gif
 

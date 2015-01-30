@@ -1,18 +1,17 @@
 # imports
 import requests
 import os
+import sys
 from bs4 import BeautifulSoup
 from datetime import date
 
 # global variables
-BASE_URL = "http://www.mangahere.co/manga/kangoku_gakuen/"
-DOWNLOAD_BASE_DIR = os.getcwd() + "/prison-school"
-soup = BeautifulSoup(requests.get(BASE_URL).text)
-today_string = date.today().strftime("%B")[:3] + date.today().strftime(" %d, %Y")
+BASE_URL = "http://www.mangahere.co/manga/kangoku_gakuen/" # default base url
+DOWNLOAD_BASE_DIR = os.getcwd() + "/prison-school" # default base directory
 
 
 # methods
-def get_chapter_list():
+def get_chapter_list(soup):
     list_items = []
     for div in soup.find_all('div'):
         if div.has_attr('class') and div['class'][0] == u'detail_list':
@@ -23,7 +22,7 @@ def get_chapter_list():
 def get_chapter_urls(list_items):
     """
     returns:
-        a list of list[name, date, url]
+        a list of list[name, chapter number, date, url]
     params:
         list_items: list of chapters as div.ul
     """
@@ -38,22 +37,26 @@ def get_chapter_urls(list_items):
         name = None
         chap_no = None
         if type(li) == tag_type:
+            left_span = None
+            right_span = None
             for span in li.find_all('span'):
                 if span.has_attr('class') and span['class'][0] == u'right':
                     # print span.text,
-                    date = span.text
+                    right_span = span
+
                 if span.has_attr('class') and span['class'][0] == u'left':
                     # print span.a['href']
-                    url = span.a['href']
-                    chap_no = span.a.text.strip()
+                    left_span = span
 
-                if len(span.contents) > 2:
-                    name = span.contents[-1].strip()
-
-                if url is not None and date is not None:
-                    if date.lower() == "today":
-                        date = today_string
-                    chapter_urls.append([name, chap_no, date, url])
+            date = right_span.text
+            url = left_span.a['href']
+            chap_no = left_span.a.text.strip()
+            name = left_span.get_text()[left_span.get_text().rfind('\n'):].strip()
+            
+            if url is not None and date is not None:
+                if date.lower() == "today":
+                    date = today_string
+                chapter_urls.append([name, chap_no, date, url])
 
     return chapter_urls
 
@@ -65,8 +68,8 @@ def crawl_for_images(url, dad, url_list):
     image_url = section.find(id="image")['src']
     image_url = image_url[:image_url.find('?')].strip()
     next_page_url = section.a["href"].strip()
-    print image_url
-    print next_page_url
+    # print image_url
+    # print next_page_url
 
     url_list.append(image_url)
     if url == next_page_url or next_page_url[:4] != "http":
@@ -99,8 +102,12 @@ def _download_chapter(chap_url, file_location):
 
 
 def download_chapter(name, chap_no, chap_url):
+    if len(name) > 0:
+        name = '-' + name
+    name = name.replace(',','')
+    name = name.replace('.','')
     name = name.replace(" ","-")
-    name = str(chap_no.split()[-1].zfill(3)) + "-" + name
+    name = str(chap_no.split()[-1].zfill(3)) + name
     path = DOWNLOAD_BASE_DIR + "/" + name
     if not os.path.exists(path):
         os.makedirs(path)
@@ -108,13 +115,32 @@ def download_chapter(name, chap_no, chap_url):
     elif not os.path.exists(path + "/.complete"):
         _download_chapter(chap_url, path)
 
-    print "done downloading " + path
+    print "DOWNLOADED! " + path + "\n\n"
 
+
+today_string = date.today().strftime("%B")[:3] + date.today().strftime(" %d, %Y")
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3:
+        BASE_URL = sys.argv[1]
+        if BASE_URL[-1] != '/':
+            BASE_URL += '/'
+        DOWNLOAD_BASE_DIR = os.getcwd() + "/" + sys.argv[2]
+
+        if DOWNLOAD_BASE_DIR[-1] == '/':
+            DOWNLOAD_BASE_DIR = DOWNLOAD_BASE_DIR[:-1]
+
+        print "Downloading with custom values: ", BASE_URL, DOWNLOAD_BASE_DIR, "\n";
+    elif len(sys.argv) == 1:
+        print "Downloading with default values...\n"
+    else:
+        print "Correct usage: python main.py <manga base url> <folder name in the current dir to download>\n"
+        sys.exit(1)
+
     if not os.path.exists(DOWNLOAD_BASE_DIR):
         os.makedirs(DOWNLOAD_BASE_DIR)
 
-    urls = get_chapter_urls(get_chapter_list())
+    soup = BeautifulSoup(requests.get(BASE_URL).text)
+    urls = get_chapter_urls(get_chapter_list(soup))
     for url in urls:
         download_chapter(url[0], url[1], url[-1])
