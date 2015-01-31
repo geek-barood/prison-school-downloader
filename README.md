@@ -20,9 +20,10 @@ $ python main.py <root url of the manga in mangahere site> <name of the director
 ```
 eg. 
 ```
-python main.py http://www.mangahere.co/manga/kangoku_gakuen/ prison-school/
+python main.py http://www.mangahere.co/manga/kangoku_gakuen/ prison-school/ [OPTION]
 ```
 It will download all the chapters starting from the most recent one and dump them in `./prison-school`
+If OPTION is `-m` then downloading is done in multimode i.e., all chapters are downloaded at once
 
 ### Contribution
 --------------------------------
