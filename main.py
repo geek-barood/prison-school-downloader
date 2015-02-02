@@ -1,3 +1,5 @@
+#TODO add thread pool for limited number of threads
+#TODO keyboard interrupts for safe closing of thread and applcation
 # imports
 import requests
 import os
