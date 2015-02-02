@@ -10,15 +10,9 @@ from datetime import date
 import timeit
 import Queue, threading
 
-# global variables
-BASE_URL = "http://www.mangahere.co/manga/kangoku_gakuen/" # default base url
-DOWNLOAD_BASE_DIR = os.path.join(os.getcwd(),"prison-school") # default base directory
-DOWNLOAD_MODE = 0
-task_queue = None
-
 # Thread worker class
 class ConsumerThread(threading.Thread):
-    """ This thread runs in the background when a chapter is started.
+    """ This thread runs in the background when a the program runs.
         The task queue contains a tuple (image_url, dump_path)
 
         It checks the Task queue if there are any task left to do(having a
@@ -30,105 +24,125 @@ class ConsumerThread(threading.Thread):
         self._queue = _queue
         self.stoprequest = threading.Event()
 
+    def join(self, timeout=None):
+        self.stoprequest.set()
+        super(ConsumerThread, self).join(timeout)
+
     def run(self):
         while not self.stoprequest.isSet():
             try:
-                image_url, dump_path = self._queue.get(True, 0.05)
-                threading.Thread(target=download_image, args=(image_url,dump_path)).start()
+                image_url, dump_path, attempt = self._queue.get(True, 0.05)
+                MangaDownloader.download_image(self._queue, image_url, dump_path, attempt)
             except Queue.Empty:
                 continue
 
-# methods
-def get_chapter_urls(soup):
-    """
-    returns:
-        a list of list[name, chapter number, url]
-    """
-    urls = []
-    spans = soup.find_all('span', class_=u'left')
-    for span in spans:
-        if type(span.a) is bs4.element.Tag:
-            urls.append([span.get_text()[span.get_text().rfind('\n'):].strip(),\
-                    span.a.text.strip(),\
-                    span.a['href']])
+class MangaDownloader:
+    def __init__(self, q, max_retries):
+        self._queue = q
+        self.directory = None
+        self.MAX_RETRIES =  max_retries
+        self.today_string = date.today().strftime("%B")[:3] + date.today().strftime(" %d, %Y")
 
-    return urls
+    def set_output_dir(self, path):
+        self.directory = path
 
-def crawl_for_images(queue, url, dad, directory_loc):
-    curr_page = requests.get(url).text
-    viewer = SoupStrainer(id="viewer")
-    curr_soup = BeautifulSoup(curr_page, parse_only=viewer)
+    def get_chapter_urls(self, soup):
+        """
+        returns:
+            a list of list[name, chapter number, url]
+        """
+        urls = []
+        spans = soup.find_all('span', class_=u'left')
+        for span in spans:
+            if type(span.a) is bs4.element.Tag:
+                urls.append([span.get_text()[span.get_text().rfind('\n'):].strip(),\
+                        span.a.text.strip(),\
+                        span.a['href']])
 
-    image_url = curr_soup.find(id="image")['src']
-    image_url = image_url[:image_url.find('?')].strip()
-    next_page_url = curr_soup.a["href"].strip()
+        return urls
 
-    filename = image_url[image_url.rfind("/")+1:]
-    dump_path = os.path.join(directory_loc, filename)
-    if not os.path.isfile(dump_path):
-        # add_task_to_queue(queue, image_url, dump_path)
-        threading.Thread(target=add_task_to_queue, args=(queue, image_url,dump_path)).start()
+    def crawl_for_images(self, url, dad, chap_path):
+        curr_page = requests.get(url).text
+        viewer = SoupStrainer(id="viewer")
+        curr_soup = BeautifulSoup(curr_page, parse_only=viewer)
 
-    if url == next_page_url or next_page_url[:4] != "http":
-        return
+        image_url = curr_soup.find(id="image")['src']
+        image_url = image_url[:image_url.find('?')].strip()
+        next_page_url = curr_soup.a["href"].strip()
 
-    crawl_for_images(queue, next_page_url, url, directory_loc)
+        filename = image_url[image_url.rfind("/")+1:]
+        dump_path = os.path.join(chap_path, filename)
 
+        if not os.path.isfile(dump_path):
+            # add task to the queue
+            self.add_task_to_queue(image_url,dump_path)
 
-def add_task_to_queue(queue, image_url, dump_path):
-    queue.put((image_url, dump_path))
+        if url == next_page_url or next_page_url[:4] != "http":
+            return
 
-def crawl_chapter(queue, chap_url, directory_loc):
-    if DOWNLOAD_MODE == 0:
-        print "getting image urls for chapter: ", chap_url
-    crawl_for_images(queue, chap_url, None, directory_loc)
-
-def download_image(image_url, dump_path):
-    """ This method adds the task to the queue
-    """
-    # refer to this link for details:
-    # https://www.codementor.io/tips/3443978201/how-to-download-image-using-requests-in-python
-
-    r = requests.get(image_url, stream=True)
-    print "downloading " + image_url + " to: " + dump_path
-    if r.status_code == 200:
-        with open(dump_path, 'wb') as f:
-            # default is 128 byte chunk size which takes too much of CPU
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
+        self.crawl_for_images(next_page_url, url, chap_path)
 
 
-def _download_chapter(queue, chap_url, file_location):
-    crawl_chapter(queue, chap_url, file_location)
+    def add_task_to_queue(self, image_url, dump_path):
+        self._queue.put((image_url, dump_path, 1))
 
-def download_chapter(queue, name, chap_no, chap_url):
-    if len(name) > 0:
-        name = '-' + name
-    name = name.replace(',','').replace('.','').replace(' ','-')
-    name = str(chap_no.split()[-1].zfill(3)) + name
-    path = os.path.join(DOWNLOAD_BASE_DIR, name)
-    if not os.path.exists(path):
-        os.makedirs(path)
-        _download_chapter(queue, chap_url, path)
-    elif not os.path.exists(path + "/.complete"):
-        _download_chapter(queue, chap_url, path)
+    def crawl_chapter(self, chap_url, chap_path):
+        self.crawl_for_images(chap_url, None, chap_path)
 
-    print "DOWNLOADED! " + path + "\n\n"
+    @staticmethod
+    def download_image(queue, image_url, dump_path, attempt):
+        """ This method adds the task to the queue
+        """
+        try:
+            r = requests.get(image_url, stream=True, timeout=2)
+            if r.status_code == 200:
+                with open(dump_path, 'wb') as f:
+                    # default small chunk size takes too much of CPU
+                    for chunk in r.iter_content(chunk_size=1024):
+                        f.write(chunk)
+
+                print "downloaded", image_url, "to", dump_path
+            elif r.status_code == 404:
+                print "Image not found!"
+            else:
+                print "Error downloading image", image_url
+
+        except requests.exceptions.Timeout:
+            if attempt > self.MAX_RETRIES:
+                print "downloading", image_url, "failed"
+
+            else:
+                print "retrying", image_url + "..."
+                queue.put((image_url, dump_path, attempt+1))
+        except requests.exceptions.ConnectionError:
+            print "download", image_url + " failed"
 
 
-today_string = date.today().strftime("%B")[:3] + date.today().strftime(" %d, %Y")
+    def _download_chapter(self, chap_url, chap_path):
+        self.crawl_chapter(chap_url, chap_path)
 
-if __name__ == "__main__":
-    if len(sys.argv) == 3 or len(sys.argv) == 4:
-        if len(sys.argv) == 4:
-            if sys.argv[3] == '-m':
-                DOWNLOAD_MODE = 1
+    def download_chapter(self, name, chap_no, chap_url):
+        if len(name) > 0:
+            name = '-' + name
+        name = name.replace(',','').replace('.','').replace(' ','-')
+        name = str(chap_no.split()[-1].zfill(3)) + name
+        chap_path = os.path.join(self.directory, name)
+        if not os.path.exists(chap_path):
+            os.makedirs(chap_path)
+            self._download_chapter(chap_url, chap_path)
+        elif not os.path.exists(chap_path + "/.complete"):
+            self._download_chapter(chap_url, chap_path)
+
+
+
+def main():
+    if len(sys.argv) == 3:
         BASE_URL = sys.argv[1]
         if BASE_URL[-1] != '/':
             BASE_URL += '/'
 
         DOWNLOAD_BASE_DIR = os.path.join(os.getcwd(), sys.argv[2])
-        print "Downloading with custom values " + "multi mode" if DOWNLOAD_MODE==1 else "normal mode",": ", BASE_URL, DOWNLOAD_BASE_DIR, "\n"
+        print "Downloading with custom values ", BASE_URL, DOWNLOAD_BASE_DIR, "\n"
     elif len(sys.argv) == 1:
         print "Downloading with default values...\n"
     else:
@@ -153,18 +167,31 @@ if __name__ == "__main__":
     if __debug__:
         print "time taken to build the soup object: ", end - start
 
+
+    task_queue = Queue.Queue()
+    manga_downloader = MangaDownloader(task_queue, max_retries=2)
     start = timeit.default_timer()
-    urls = get_chapter_urls(soup)
+    urls = manga_downloader.get_chapter_urls(soup)
     end = timeit.default_timer()
     if __debug__:
         print "time taken to get_chapter_urls(soup): ", end - start
 
-    task_queue = Queue.Queue()
-    ConsumerThread(task_queue).start()
+    thread_pool = [ConsumerThread(task_queue) for i in xrange(4)]
+    for consumer in thread_pool:
+        consumer.start()
+
     for url in urls:
-        if DOWNLOAD_MODE == 1:
-            threading.Thread(target=download_chapter, args=(task_queue,url[0],url[1],url[-1])).start()
-        else:
-            download_chapter(task_queue, url[0], url[1], url[-1])
+        try:
+            manga_downloader.set_output_dir(DOWNLOAD_BASE_DIR)
+            manga_downloader.download_chapter(url[0], url[1], url[-1])
+        except KeyboardInterrupt:
+            print "\nKeyboard Interrupt received, closing threads..."
+            break
+
+    for consumer in thread_pool:
+        consumer.join()
+    print "All threads closed"
 
 
+if __name__ == '__main__':
+    main()
