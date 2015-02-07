@@ -1,5 +1,8 @@
-#TODO add thread pool for limited number of threads
-#TODO keyboard interrupts for safe closing of thread and applcation
+#TODO fix issue: every exception kills/closes the thread which got the
+#               exception
+#TODO add failed download retry feature
+#TODO add Logging
+
 # imports
 import requests
 import os
@@ -9,7 +12,10 @@ from bs4 import BeautifulSoup, SoupStrainer
 from datetime import date
 import timeit
 import Queue, threading
+import re, unicodedata
 
+fail_list = [] # stores the list of tuples (url,download path) which failed
+               # to download
 # Thread worker class
 class ConsumerThread(threading.Thread):
     """ This thread runs in the background when a the program runs.
@@ -19,9 +25,10 @@ class ConsumerThread(threading.Thread):
         timeout seconds till it holds the queue to check, and if it finds one
         it runs the image_download() method as a new thread
     """
-    def __init__(self, _queue):
+    def __init__(self, _queue, max_retries):
         super(ConsumerThread, self).__init__()
         self._queue = _queue
+        self.max_retries = max_retries
         self.stoprequest = threading.Event()
 
     def join(self, timeout=None):
@@ -32,7 +39,8 @@ class ConsumerThread(threading.Thread):
         while not self.stoprequest.isSet():
             try:
                 image_url, dump_path, attempt = self._queue.get(True, 0.05)
-                MangaDownloader.download_image(self._queue, image_url, dump_path, attempt)
+                MangaDownloader.download_image(self._queue, image_url, dump_path,\
+                            attempt, self.max_retries)
             except Queue.Empty:
                 continue
 
@@ -41,7 +49,8 @@ class MangaDownloader:
         self._queue = q
         self.directory = None
         self.MAX_RETRIES =  max_retries
-        self.today_string = date.today().strftime("%B")[:3] + date.today().strftime(" %d, %Y")
+        self.today_string = date.today().strftime("%B")[:3]\
+                            + date.today().strftime(" %d, %Y")
 
     def set_output_dir(self, path):
         self.directory = path
@@ -62,7 +71,13 @@ class MangaDownloader:
         return urls
 
     def crawl_for_images(self, url, dad, chap_path):
-        curr_page = requests.get(url).text
+        try:
+            curr_page = requests.get(url).text
+        except (requests.exceptions.ConnectionError,\
+                requests.exceptions.Timeout) as e:
+            print "Error crawling for image:", e.args[0].reason
+            return
+
         viewer = SoupStrainer(id="viewer")
         curr_soup = BeautifulSoup(curr_page, parse_only=viewer)
 
@@ -76,6 +91,8 @@ class MangaDownloader:
         if not os.path.isfile(dump_path):
             # add task to the queue
             self.add_task_to_queue(image_url,dump_path)
+        else:
+            print image_url, "is already present"
 
         if url == next_page_url or next_page_url[:4] != "http":
             return
@@ -90,42 +107,61 @@ class MangaDownloader:
         self.crawl_for_images(chap_url, None, chap_path)
 
     @staticmethod
-    def download_image(queue, image_url, dump_path, attempt):
-        """ This method adds the task to the queue
+    def download_image(queue, image_url, dump_path, attempt, max_retries):
+        """
+        This method adds the task to the task queue.
+        If any error occurs it adds to the task queue again if number of
+        attempts is not exceeding max number of retries.
+
+        It also adds the failed files to the failed list so that it will
+        create a file inside the current chapter which lists which files failed.
+        (Yet to implement the above feature)
         """
         try:
-            r = requests.get(image_url, stream=True, timeout=2)
+            r = requests.get(image_url, stream=True, timeout=3)
             if r.status_code == 200:
                 with open(dump_path, 'wb') as f:
                     # default small chunk size takes too much of CPU
                     for chunk in r.iter_content(chunk_size=1024):
                         f.write(chunk)
 
-                print "downloaded", image_url, "to", dump_path
+                print "downloaded", image_url
             elif r.status_code == 404:
                 print "Image not found!"
             else:
                 print "Error downloading image", image_url
 
-        except requests.exceptions.Timeout:
-            if attempt > self.MAX_RETRIES:
+        except (requests.exceptions.Timeout,\
+                requests.exceptions.ConnectionError):
+            if attempt > max_retries:
                 print "downloading", image_url, "failed"
-
+                fail_list.append((image_url, dump_path))
             else:
-                print "retrying", image_url + "..."
+                print "retrying("+str(attempt)+")", image_url + "..."
                 queue.put((image_url, dump_path, attempt+1))
-        except requests.exceptions.ConnectionError:
-            print "download", image_url + " failed"
 
 
     def _download_chapter(self, chap_url, chap_path):
         self.crawl_chapter(chap_url, chap_path)
 
+    @staticmethod
+    def slugify(value):
+        """
+        Converts to ASCII. Converts spaces to hyphens. Removes characters that
+        aren't alphanumerics, underscores, or hyphens. Converts to lowercase.
+        Also strips leading and trailing whitespace.
+        """
+        value = unicode(value)
+        value = unicodedata.normalize('NFKD', value).encode('ascii','ignore').decode('ascii')
+        value = re.sub('[^\w\s-]', '', value).strip().lower()
+        return re.sub('[-\s]+','-',value)
+
     def download_chapter(self, name, chap_no, chap_url):
         if len(name) > 0:
+            name = self.slugify(name)
             name = '-' + name
-        name = name.replace(',','').replace('.','').replace(' ','-')
-        name = str(chap_no.split()[-1].zfill(3)) + name
+
+        name = str(chap_no.split()[-1].zfill(4)) + name
         chap_path = os.path.join(self.directory, name)
         if not os.path.exists(chap_path):
             os.makedirs(chap_path)
@@ -155,7 +191,13 @@ def main():
         os.makedirs(DOWNLOAD_BASE_DIR)
 
     start = timeit.default_timer()
-    page = requests.get(BASE_URL).text
+    try:
+        page = requests.get(BASE_URL).text
+    except (requests.exceptions.Timeout,\
+            requests.exceptions.ConnectionError) as e:
+        print "Error getting base url:", e.args[0].reason
+        exit(0)
+
     end = timeit.default_timer()
     if __debug__:
         print "time take to request the url: ", end - start
@@ -169,14 +211,15 @@ def main():
 
 
     task_queue = Queue.Queue()
-    manga_downloader = MangaDownloader(task_queue, max_retries=2)
+    manga_downloader = MangaDownloader(task_queue, max_retries=4)
     start = timeit.default_timer()
     urls = manga_downloader.get_chapter_urls(soup)
     end = timeit.default_timer()
     if __debug__:
         print "time taken to get_chapter_urls(soup): ", end - start
 
-    thread_pool = [ConsumerThread(task_queue) for i in xrange(4)]
+    thread_pool = [ConsumerThread(task_queue,\
+            manga_downloader.MAX_RETRIES) for i in xrange(4)]
     for consumer in thread_pool:
         consumer.start()
 
@@ -190,7 +233,10 @@ def main():
 
     for consumer in thread_pool:
         consumer.join()
-    print "All threads closed"
+    print "All threads closed\n"
+    print len(fail_list), "files failed!!"
+    for fail in fail_list:
+        print fail[0], fail[1]
 
 
 if __name__ == '__main__':
