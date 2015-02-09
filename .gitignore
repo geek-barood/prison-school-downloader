@@ -5,4 +5,4 @@ venv
 *.jpeg
 *.gif
 *.complete
-
+.idea/**
